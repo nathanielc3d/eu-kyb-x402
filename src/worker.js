@@ -1,7 +1,11 @@
-// Money Machine — "EU KYB & agent-jobs" pay-per-call API for AI agents (x402, USDC on Base).
+// Money Machine: "EU KYB & agent-jobs" pay-per-call API for AI agents (x402, USDC on Base).
 // Runs unchanged on Cloudflare Workers / Deno Deploy / any WinterCG runtime. No dependencies.
 // Payments are verified+settled by the PayAI facilitator (no API key; facilitator pays gas),
 // funds go straight to PAY_TO. Built and operated by an AI agent (disclosed in every response).
+
+import { checkIban } from "./iban.js";
+import { verdict } from "./counterparty.js";
+import { laxOffer } from "./offer.js";
 
 const PAY_TO = "0x40f100ccCF51EEA928a3f314fB6ab63Bf8fa51F3";
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -24,6 +28,18 @@ const ROUTES = {
     params: { siren: { type: "string", description: "9-digit SIREN number (give siren OR q)", example: "356000000" }, q: { type: "string", description: "Company name search, >= 3 chars (give siren OR q)", example: "la poste" } },
     example: { query: "356000000", count: 1, results: [{ siren: "356000000", name: "LA POSTE", status: "active", legal_form_code: "5510", naf: "53.10Z", hq: { city: "PARIS" }, vat_number: "FR39356000000", vat_check: { valid: true } }], source: "recherche-entreprises.api.gouv.fr" },
     handler: frCompany },
+  "/v1/iban": {
+    price: "3000", name: "iban_check", tags: ["iban", "sepa", "bank", "payments", "kyb", "invoice"],
+    desc: "Validate an IBAN offline (ISO 13616 mod 97, registry length per country): validity, country, SEPA and EU membership, national bank code, formatted IBAN and plain reasons when it fails. Params: ?iban=DE89370400440532013000",
+    params: { iban: { type: "string", description: "IBAN, spaces allowed, e.g. DE89 3704 0044 0532 0130 00", example: "DE89370400440532013000", required: true } },
+    example: { iban: "DE89370400440532013000", valid: true, country: "DE", check_digits: "89", bban: "370400440532013000", length: 22, expected_length: 22, sepa: true, eu: true, bank_code: "37040044", errors: [], formatted: "DE89 3704 0044 0532 0130 00" },
+    handler: ibanRoute },
+  "/v1/eu/counterparty": {
+    price: "10000", name: "eu_counterparty_check", tags: ["kyb", "vat", "iban", "supplier", "invoice-fraud", "compliance"],
+    desc: "Supplier or customer check before you pay or invoice: live EU VIES VAT validation, IBAN validation, IBAN country vs VAT country, and claimed name vs registered name, folded into one verdict (pass, review, fail) with plain reasons. Params: ?vat=FR39356000000&iban=FR76...&name=La Poste",
+    params: { vat: { type: "string", description: "EU VAT number with country prefix", example: "FR39356000000", required: true }, iban: { type: "string", description: "optional IBAN the counterparty asks you to pay", example: "FR7630006000011234567890189" }, name: { type: "string", description: "optional name the counterparty claims", example: "La Poste" } },
+    example: { vat: { vat: "FR39356000000", country: "FR", valid: true, name: "SA LA POSTE" }, iban: { valid: true, country: "FR" }, verdict: "pass", reasons: ["VAT FR39356000000 is valid in VIES"], name_match: 1 },
+    handler: counterpartyRoute },
   "/v1/agent-jobs": {
     price: "3000", name: "agent_jobs_feed", tags: ["agents", "jobs", "bounties", "tasks", "earn", "crypto"],
     desc: "Live feed of funded, agent-eligible paid tasks across agent job boards (Taskmarket on Base, Superteam Earn agent listings), normalized: reward, token, deadline, submissions, link. Refreshed on every call.",
@@ -82,8 +98,36 @@ function bazaar(path) {
     },
   };
 }
+// ---- Base Builder Code (x402 "builder-code" extension, ERC-8021 Schema 2) ----
+// Config value BUILDER_CODE (wrangler var, e.g. "bc_xxxxxxxx" from base.dev). Empty = extension not advertised,
+// behaviour identical to before. When set, the 402 declares { a: code } so clients echo it and a
+// builder-code-aware facilitator appends the ERC-8021 suffix to the settlement calldata.
+// Spec: https://github.com/x402-foundation/x402/blob/main/specs/extensions/builder_code.md
+const BC_PATTERN = /^[a-z0-9_]{1,32}$/;
+const BC_MAX_ECHO_S = 10; // MAX_CLIENT_SERVICE_CODES + MAX_SERVER_SERVICE_CODES
+let BUILDER_CODE = "";
+export function setBuilderCode(code) { const c = String(code || "").trim(); BUILDER_CODE = BC_PATTERN.test(c) ? c : ""; return BUILDER_CODE; }
+const BC_CODE_SCHEMA = { type: "string", pattern: "^[a-z0-9_]{1,32}$" };
+export function builderCodeExtension() {
+  if (!BUILDER_CODE) return null;
+  return { info: { a: BUILDER_CODE }, schema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object",
+    properties: { a: { ...BC_CODE_SCHEMA, description: "App builder code" }, w: { ...BC_CODE_SCHEMA, description: "Wallet builder code" },
+      s: { type: "array", items: BC_CODE_SCHEMA, description: "Service builder codes" } }, additionalProperties: false } };
+}
+// Server-side echo validation (spec: resource server MUST reject extension_echo_mismatch before verify/settle).
+export function builderCodeEchoError(payload) {
+  const raw = payload && payload.extensions && payload.extensions["builder-code"];
+  if (!raw) return null;
+  const e = raw.info && typeof raw.info === "object" ? raw.info : raw; // @x402 clients echo { info, schema }
+  if (e.a !== undefined && e.a !== BUILDER_CODE) return "extension_echo_mismatch: builder-code a";
+  const s = e.s === undefined ? [] : Array.isArray(e.s) ? e.s : [e.s];
+  if (s.length > BC_MAX_ECHO_S || s.some(x => !BC_PATTERN.test(String(x)))) return "extension_echo_mismatch: builder-code s";
+  return null;
+}
 function paymentRequiredV2(url, path, error) {
-  return { x402Version: 2, error, resource: resourceInfo(url, path), accepts: [reqV2(path)], extensions: { bazaar: bazaar(path) } };
+  const extensions = { bazaar: bazaar(path) };
+  const bc = builderCodeExtension(); if (bc) extensions["builder-code"] = bc;
+  return { x402Version: 2, error, resource: resourceInfo(url, path), accepts: [reqV2(path)], extensions };
 }
 // 402: v2 object in PAYMENT-REQUIRED header (canonical), v1 object in body (legacy clients/scanners)
 function respond402(url, path, error, extraHeaders = {}) {
@@ -115,6 +159,7 @@ async function bump(env, key) {
 
 export default {
   async fetch(request, env, ctx) {
+    setBuilderCode(env && env.BUILDER_CODE);
     const res = await handle(request);
     try {
       const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
@@ -140,6 +185,7 @@ async function handle(request) {
     if (path === "/.well-known/x402") return json(wellKnown(url));
     if (path === "/openapi.json" || path === "/.well-known/openapi.json") return json(openapi(url));
     if (path === "/llms.txt") return text(llmsTxt(url));
+    if (path === "/lax-offer.json") return json(laxOffer(ROUTES, url.origin));
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\n");
     if (path === "/health") return json({ ok: true });
     if (path === "/v1/sample/fr/company") {
@@ -150,11 +196,11 @@ async function handle(request) {
     if (!route) return json({ error: "not_found", catalog: url.origin + "/" }, 404);
 
     const h2 = request.headers.get("PAYMENT-SIGNATURE"), h1 = request.headers.get("X-PAYMENT");
-    if (!h2 && !h1) return respond402(url, path, "PAYMENT-SIGNATURE header is required (x402 v2; X-PAYMENT accepted for v1)");
-
-    // validate input BEFORE verify/settle -> never charged for a bad request
+    // Input is checked before any payment step: a bad request is answered 400 and never charged.
+    // A bare unpaid call (no query) gets the 402 terms, so x402 scanners and buyers can read the price.
     const bad = validate(path, url);
-    if (bad) return json({ error: "bad_request", detail: bad, charged: false }, 400);
+    if (bad && (h2 || h1 || url.search)) return json({ error: "bad_request", detail: bad, charged: false }, 400);
+    if (!h2 && !h1) return respond402(url, path, "PAYMENT-SIGNATURE header is required (x402 v2; X-PAYMENT accepted for v1)");
 
     let payload;
     try { payload = b64d(h2 || h1); } catch { return json({ x402Version: 2, error: "invalid_payload: payment header is not base64 JSON", charged: false }, 400); }
@@ -165,6 +211,8 @@ async function handle(request) {
       const a = payload.accepted || {};
       if (a.scheme !== "exact" || a.network !== NET_V2 || !same(a.asset, USDC_BASE) || !same(a.payTo, PAY_TO) || String(a.amount) !== req.amount)
         return respond402(url, path, "payment does not match requirements (expected exact / eip155:8453 / USDC / payTo / amount)");
+      const bcErr = builderCodeEchoError(payload);
+      if (bcErr) return respond402(url, path, bcErr);
     } else {
       req = reqV1(url, path);
       if (payload.scheme !== "exact" || payload.network !== NET_V1) return respond402(url, path, "unsupported scheme/network (expected exact on base)");
@@ -192,13 +240,13 @@ function catalog(url) {
     payment: { protocol: "x402 (v2 + v1 compatible)", scheme: "exact", network: NET_V2 + " (Base mainnet)", asset: "USDC " + USDC_BASE, payTo: PAY_TO, facilitator: FACILITATOR,
       howto: "Call a paid endpoint -> HTTP 402 with PAYMENT-REQUIRED header (base64 v2 PaymentRequired; v1 body also provided) -> retry with PAYMENT-SIGNATURE (v2) or X-PAYMENT (v1). Invalid input is rejected with 400 before any charge." },
     endpoints: Object.entries(ROUTES).map(([p, r]) => ({ method: "GET", url: url.origin + p, price_usdc: Number(r.price) / 1e6, params: r.params, description: r.desc })),
-    free: ["/v1/sample/fr/company", "/openapi.json", "/llms.txt", "/.well-known/x402", "/health"],
+    free: ["/v1/sample/fr/company", "/openapi.json", "/llms.txt", "/.well-known/x402", "/lax-offer.json", "/health"],
     sources: ["EU VIES (ec.europa.eu)", "recherche-entreprises.api.gouv.fr (Licence Ouverte 2.0)", "api.taskmarket.dev", "superteam.fun agent API"], contact: "nathanielcloud3@gmail.com" };
 }
 
 function wellKnown(url) {
   return { version: 1, resources: Object.keys(ROUTES).map(p => url.origin + p), openapi: url.origin + "/openapi.json",
-    instructions: "Pay-per-call EU VAT (VIES) validation, French company KYB and agent-jobs feed. x402 exact, USDC on Base (eip155:8453), facilitator PayAI. Operated by an autonomous AI agent.",
+    instructions: "Pay-per-call EU counterparty verdict, EU VAT (VIES) and IBAN validation, French company KYB and agent-jobs feed. x402 exact, USDC on Base (eip155:8453), facilitator PayAI. Operated by an autonomous AI agent.",
     x402Version: 2, items: Object.keys(ROUTES).map(p => paymentRequiredV2(url, p, "discovery")) };
 }
 
@@ -222,9 +270,9 @@ function openapi(url) {
   paths["/"] = free("Service catalog");
   return {
     openapi: "3.1.0",
-    info: { title: "Money Machine - EU KYB & agent-jobs API (x402)", version: "1.1.0",
-      description: "Pay-per-call API for AI agents: EU VAT validation via VIES, French company KYB from official open data, and a feed of agent-eligible paid tasks. No account, no API key: pay per request in USDC on Base via x402. Built and operated by an autonomous AI agent.",
-      "x-guidance": "GET /v1/eu/vat?vat=FR39356000000 to validate an EU VAT number (0.003 USD). GET /v1/fr/company?siren=356000000 or ?q=name for a French company card with VAT check (0.005 USD). GET /v1/agent-jobs for open agent-eligible bounties (0.003 USD). Unpaid calls return HTTP 402 with x402 requirements; invalid input returns 400 and is not charged.",
+    info: { title: "Money Machine - EU KYB & agent-jobs API (x402)", version: "1.2.0",
+      description: "Pay-per-call API for AI agents: EU counterparty verdict (VAT + IBAN + name), EU VAT validation via VIES, IBAN validation, French company KYB from official open data, and a feed of agent-eligible paid tasks. No account, no API key: pay per request in USDC on Base via x402. Built and operated by an autonomous AI agent.",
+      "x-guidance": "GET /v1/eu/counterparty?vat=BE0403170701&iban=BE68539007547034&name=Electrabel for a pass, review or fail verdict before paying a supplier (0.01 USD). GET /v1/iban?iban=DE89370400440532013000 to validate an IBAN (0.003 USD). GET /v1/eu/vat?vat=FR39356000000 to validate an EU VAT number (0.003 USD). GET /v1/fr/company?siren=356000000 or ?q=name for a French company card with VAT check (0.005 USD). GET /v1/agent-jobs for open agent-eligible bounties (0.003 USD). Unpaid calls return HTTP 402 with x402 requirements; invalid input returns 400 and is not charged.",
       contact: { name: "Money Machine (AI agent)", email: "nathanielcloud3@gmail.com", url: url.origin + "/" }, "x-operator": "autonomous AI agent" },
     servers: [{ url: url.origin }],
     paths,
@@ -251,6 +299,10 @@ Invalid input returns 400 before any charge. Upstream failure returns 502 and th
 - [OpenAPI](${o}/openapi.json)
 - [x402 manifest](${o}/.well-known/x402)
 - [Sample](${o}/v1/sample/fr/company): free example company card
+- [LAX offer](${o}/lax-offer.json): the offer listed on the Kognai LAX registry
+
+## Refuses
+- Lookups of private persons, bulk scraping, non EU VAT numbers, and anything that is not a counterparty check. Bad input is refused with 400 and never charged.
 `;
 }
 
@@ -268,6 +320,18 @@ function validate(path, url) {
     const v = (url.searchParams.get("vat") || "").toUpperCase().replace(/[\s.\-]/g, "");
     if (!/^[A-Z]{2}[A-Z0-9]{2,13}$/.test(v) || !EU.includes(v.slice(0, 2))) return "vat must be an EU VAT number with country prefix, e.g. FR39356000000, DE811569869";
   }
+  if (path === "/v1/iban") {
+    const i = (url.searchParams.get("iban") || "").replace(/[\s\-.]/g, "");
+    if (!/^[A-Za-z]{2}\d{2}[A-Za-z0-9]{8,32}$/.test(i)) return "iban must look like an IBAN: 2 letters, 2 digits, then 8 to 32 letters or digits";
+  }
+  if (path === "/v1/eu/counterparty") {
+    const v = (url.searchParams.get("vat") || "").toUpperCase().replace(/[\s.\-]/g, "");
+    if (!/^[A-Z]{2}[A-Z0-9]{2,13}$/.test(v) || !EU.includes(v.slice(0, 2))) return "vat must be an EU VAT number with country prefix, e.g. FR39356000000";
+    const i = url.searchParams.get("iban");
+    if (i && !/^[A-Za-z]{2}\d{2}[A-Za-z0-9]{8,32}$/.test(i.replace(/[\s\-.]/g, ""))) return "iban, when given, must look like an IBAN";
+    const n = url.searchParams.get("name");
+    if (n && (n.length < 2 || n.length > 200)) return "name, when given, must be 2 to 200 characters";
+  }
   if (path === "/v1/fr/company") {
     const siren = url.searchParams.get("siren"), q = url.searchParams.get("q");
     if (siren && !/^\d{9}$/.test(siren.replace(/\s/g, ""))) return "siren must be 9 digits";
@@ -276,10 +340,19 @@ function validate(path, url) {
   return null;
 }
 
-async function vies(cc, num) {
+const VIES_DOWN = new Set(["MS_UNAVAILABLE", "TIMEOUT", "SERVICE_UNAVAILABLE", "MS_MAX_CONCURRENT_REQ", "GLOBAL_MAX_CONCURRENT_REQ", "INVALID_REQUESTER_INFO"]);
+
+async function viesOnce(cc, num) {
   const r = await fetch(`https://ec.europa.eu/taxation_customs/vies/rest-api/ms/${cc}/vat/${encodeURIComponent(num)}`, { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(12000) });
   if (!r.ok) throw new Error("VIES HTTP " + r.status);
-  const d = await r.json();
+  return r.json();
+}
+
+// One retry on the transient VIES errors (member state busy); never reports "invalid" when VIES is down.
+async function vies(cc, num) {
+  let d = await viesOnce(cc, num);
+  if (VIES_DOWN.has(d.userError)) { await new Promise((ok) => setTimeout(ok, 1500)); d = await viesOnce(cc, num); }
+  if (VIES_DOWN.has(d.userError)) throw new Error("VIES member state service unavailable: " + d.userError);
   return { valid: !!d.isValid, status: d.userError, name: d.name && d.name !== "---" ? d.name : null, address: d.address && d.address !== "---" ? d.address : null, checked_at: d.requestDate, source: "EU VIES" };
 }
 
@@ -312,7 +385,20 @@ async function frCompany(url) {
   };
   const results = (d.results || []).map(pick);
   if (results[0]) { try { results[0].vat_check = await vies("FR", results[0].vat_number.slice(2)); } catch (e) { results[0].vat_check = { error: String(e) }; } }
-  return { query: q, count: results.length, results, source: "recherche-entreprises.api.gouv.fr (INSEE Sirene, RNE) — Licence Ouverte 2.0" };
+  return { query: q, count: results.length, results, source: "recherche-entreprises.api.gouv.fr (INSEE Sirene, RNE), Licence Ouverte 2.0" };
+}
+
+async function ibanRoute(url) {
+  return { ...checkIban(url.searchParams.get("iban")), checked_at: new Date().toISOString(), source: "ISO 13616 mod 97 and the SWIFT IBAN registry lengths (offline)" };
+}
+
+async function counterpartyRoute(url) {
+  const vatNum = url.searchParams.get("vat").toUpperCase().replace(/[\s.\-]/g, "");
+  const vat = { vat: vatNum, country: vatNum.slice(0, 2), ...(await vies(vatNum.slice(0, 2), vatNum.slice(2))) };
+  const ibanRaw = url.searchParams.get("iban");
+  const iban = ibanRaw ? checkIban(ibanRaw) : null;
+  const name = url.searchParams.get("name") || null;
+  return { vat, iban, claimed_name: name, ...verdict({ vat, iban, name }), checked_at: new Date().toISOString(), note: "Decision support from official public data, not legal advice. A pass does not prove who you are talking to." };
 }
 
 async function agentJobs() {
@@ -330,4 +416,4 @@ async function agentJobs() {
   out.sort((a, b) => (a.deadline || "").localeCompare(b.deadline || ""));
   return { generated_at: new Date().toISOString(), count: out.length, jobs: out, note: "Only boards with verifiable funding/escrow are included. Always re-check terms on the venue." };
 }
-export { agentJobs, euVat, frCompany };
+export { agentJobs, euVat, frCompany, ibanRoute, counterpartyRoute, validate, handle, ROUTES };
