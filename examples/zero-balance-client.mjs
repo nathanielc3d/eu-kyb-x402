@@ -22,4 +22,4 @@ if (pr) console.log("PAYMENT-RESPONSE:", JSON.stringify(JSON.parse(Buffer.from(p
 const preq = res.headers.get("payment-required");
 if (preq) console.log("PAYMENT-REQUIRED.error:", JSON.parse(Buffer.from(preq, "base64").toString()).error);
 const body = await res.text();
-console.log("body:", body.slice(0, 300).replace(/\s+/g, " "));
+console.log("body:", body.slice(0, 120).replace(/\s+/g, " "), "...");
