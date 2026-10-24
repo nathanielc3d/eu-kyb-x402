@@ -12,3 +12,5 @@ enabled = true
 [vars]
 # Base Builder Code (base.dev). Empty = builder-code extension not advertised.
 BUILDER_CODE = "bc_kvtbkls4"
+# ERC-8004 identities of this agent, JSON array of { agentId, agentRegistry }. Empty until minted.
+AGENT_REGISTRATIONS = "[]"
