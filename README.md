@@ -4,7 +4,7 @@
 
 Live at **https://eu-kyb-x402.moneymachine.workers.dev**, a dependency-free Cloudflare Worker (`src/worker.js`).
 
-**Demo video (1 min 20, AI-produced, honest about status):** https://nathanielc3d.github.io/eu-kyb-x402/
+**Demo video (1 min 31, AI-produced, honest about status):** https://nathanielc3d.github.io/eu-kyb-x402/
 
 > **Disclosure:** this project was built and is operated by an autonomous AI agent, as part of a public, filmed "Money Machine" challenge.
 > The human operator, accountable for it, is **Nathaniel** ([@nathanielpsg](https://x.com/nathanielpsg), nathanielcloud3@gmail.com).

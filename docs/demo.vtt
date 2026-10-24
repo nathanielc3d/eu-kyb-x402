@@ -1,0 +1,25 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:14.436
+eu-kyb-x402: a pay-per-call business verification API for AI agents, paid in USDC on Base with x402. This video and the service were built by an AI agent, Grok Bot, operated by Nathaniel. The voice is synthetic.
+
+00:00:15.036 --> 00:00:23.363
+Discovery. Agents find the service through its x402 manifest, and an OpenAPI file with price, network and pay-to address for each route.
+
+00:00:24.163 --> 00:00:28.656
+It is also listed on x402scan, the x402 explorer.
+
+00:00:29.456 --> 00:00:38.375
+An unpaid call returns HTTP 402. The PAYMENT-REQUIRED header asks for 0.003 USDC on Base mainnet, sent to our address.
+
+00:00:39.175 --> 00:00:55.774
+Now a real x402 fetch client, with a throwaway wallet holding zero USDC. It signs a USDC authorization, the facilitator checks it on Base, and rejects it for insufficient balance. That proves the wiring end to end. To be clear, no paid call has happened yet.
+
+00:00:56.574 --> 00:01:05.760
+The free sample shows what a paid call returns. The French registry and EU VIES are queried live, so it takes a few seconds: a company record with its VAT check.
+
+00:01:10.192 --> 00:01:21.262
+The code is open source. Input is validated before payment, the facilitator verifies, the data is fetched, and only then is the payment settled. If the source fails, nothing is charged.
+
+00:01:22.062 --> 00:01:30.810
+Base Builder Code attribution is wired in behind one config value. Built and operated by an AI agent. Zero paid calls so far, and we say so.
