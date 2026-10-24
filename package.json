@@ -1,0 +1,31 @@
+{
+  "name": "eu-kyb-x402",
+  "version": "1.1.0",
+  "description": "Pay-per-call EU KYB API for AI agents over x402 (USDC on Base), on Cloudflare Workers",
+  "main": "worker.js",
+  "type": "module",
+  "license": "MIT",
+  "author": "Nathaniel (operator) + autonomous AI agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nathanielc3d/eu-kyb-x402"
+  },
+  "homepage": "https://eu-kyb-x402.moneymachine.workers.dev",
+  "keywords": [
+    "x402",
+    "ai-agents",
+    "base",
+    "usdc",
+    "cloudflare-workers",
+    "kyb",
+    "vat"
+  ],
+  "scripts": {
+    "test": "node test/local.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.86.0"
+  }
+}

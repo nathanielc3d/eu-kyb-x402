@@ -1,0 +1,10 @@
+name = "eu-kyb-x402"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+[[kv_namespaces]]
+binding = "STATS"
+id = "24eb4faca7c04b86b71886d2b545e181"
+
+[observability]
+enabled = true
