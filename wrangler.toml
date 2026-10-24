@@ -11,4 +11,4 @@ enabled = true
 
 [vars]
 # Base Builder Code (base.dev). Empty = builder-code extension not advertised.
-BUILDER_CODE = ""
+BUILDER_CODE = "bc_kvtbkls4"
